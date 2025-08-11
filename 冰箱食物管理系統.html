@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>冰箱食物管理系統</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f3f4f6;
+        }
+        .container {
+            max-width: 600px;
+        }
+        .card {
+            background-color: #ffffff;
+        }
+        .form-input {
+            width: 100%;
+        }
+        .list-item-expired {
+            background-color: #fca5a5; /* 紅色，表示已過期或剩餘 1 天 */
+        }
+        .list-item-warning {
+            background-color: #fcd34d; /* 黃色，表示即將過期 */
+        }
+        .list-item-ok {
+            background-color: #d1fae5; /* 綠色，表示尚未過期 */
+        }
+    </style>
+</head>
+<body class="bg-gray-100 flex items-center justify-center min-h-screen p-4">
+
+    <!-- Main Container -->
+    <div class="container mx-auto p-6 bg-white shadow-xl rounded-2xl">
+        <h1 class="text-3xl font-bold text-center text-gray-800 mb-6">我的冰箱</h1>
+
+        <!-- Add Food Item Form -->
+        <div class="mb-8 p-6 bg-gray-50 rounded-xl">
+            <h2 class="text-2xl font-semibold text-gray-700 mb-4">新增食物</h2>
+            <form id="addItemForm" class="space-y-4">
+                <div>
+                    <label for="foodName" class="block text-sm font-medium text-gray-700">食物名稱</label>
+                    <input type="text" id="foodName" class="mt-1 form-input px-4 py-2 border border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500" required>
+                </div>
+                <!-- 新增「幾天過期」欄位 -->
+                <div>
+                    <label for="daysUntilExpiry" class="block text-sm font-medium text-gray-700">幾天過期</label>
+                    <input type="number" id="daysUntilExpiry" class="mt-1 form-input px-4 py-2 border border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500" min="0">
+                </div>
+                <div>
+                    <label for="expiryDate" class="block text-sm font-medium text-gray-700">過期日</label>
+                    <input type="date" id="expiryDate" class="mt-1 form-input px-4 py-2 border border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500" required>
+                </div>
+                <div>
+                    <label for="notes" class="block text-sm font-medium text-gray-700">備註 (選填)</label>
+                    <textarea id="notes" rows="2" class="mt-1 form-input px-4 py-2 border border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500"></textarea>
+                </div>
+                <button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-4 rounded-lg transition duration-300 shadow-lg">
+                    新增
+                </button>
+            </form>
+        </div>
+
+        <!-- Food Item List -->
+        <div>
+            <h2 class="text-2xl font-semibold text-gray-700 mb-4">食物清單</h2>
+            <div id="foodList" class="space-y-4">
+                <!-- Food items will be rendered here by JavaScript -->
+            </div>
+        </div>
+        
+        <!-- Custom Modal for Notifications -->
+        <div id="modal" class="fixed inset-0 bg-gray-600 bg-opacity-50 hidden items-center justify-center p-4 z-50">
+            <div class="bg-white p-6 rounded-lg shadow-xl max-w-sm w-full text-center">
+                <p id="modal-message" class="text-lg font-semibold mb-4"></p>
+                <button id="modal-close-btn" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-lg transition duration-300">
+                    確定
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Use a unique app ID for Firestore to prevent data collision.
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let db;
+        let auth;
+        let userId;
+
+        // Display modal messages instead of alerts
+        function showModal(message) {
+            const modal = document.getElementById('modal');
+            const modalMessage = document.getElementById('modal-message');
+            modalMessage.textContent = message;
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+            document.getElementById('modal-close-btn').onclick = () => {
+                modal.classList.add('hidden');
+                modal.classList.remove('flex');
+            };
+        }
+
+        // Initialize Firebase and set up authentication
+        async function initializeFirebaseAndAuth() {
+            if (firebaseConfig) {
+                // Dynamic import of Firebase libraries
+                const firebaseApp = (await import('https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js')).initializeApp(firebaseConfig);
+                const firestore = await import('https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js');
+                const firebaseAuth = await import('https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js');
+                
+                db = firestore.getFirestore(firebaseApp);
+                auth = firebaseAuth.getAuth(firebaseApp);
+
+                try {
+                    if (initialAuthToken) {
+                        await firebaseAuth.signInWithCustomToken(auth, initialAuthToken);
+                    } else {
+                        await firebaseAuth.signInAnonymously(auth);
+                    }
+                    console.log('Firebase auth successful.');
+                    userId = auth.currentUser.uid;
+                    setupFoodListListener();
+                } catch (error) {
+                    console.error('Firebase authentication error:', error);
+                    // Fallback to anonymous sign-in if custom token fails
+                    try {
+                        await firebaseAuth.signInAnonymously(auth);
+                        userId = auth.currentUser.uid;
+                        setupFoodListListener();
+                    } catch (anonymousError) {
+                        console.error('Anonymous authentication error:', anonymousError);
+                        showModal('認證失敗，請重新載入頁面。');
+                    }
+                }
+            } else {
+                console.warn("Firebase config not available. App will run without data persistence.");
+            }
+        }
+
+        // Setup real-time listener for food items
+        async function setupFoodListListener() {
+            if (!db || !userId) {
+                console.error("Firestore not initialized or userId is missing.");
+                return;
+            }
+            try {
+                const firestore = await import('https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js');
+                const foodCollectionRef = firestore.collection(db, `artifacts/${appId}/users/${userId}/foodItems`);
+                
+                // Set up real-time listener with onSnapshot
+                firestore.onSnapshot(foodCollectionRef, (snapshot) => {
+                    const foodItems = [];
+                    snapshot.forEach(doc => {
+                        foodItems.push({ id: doc.id, ...doc.data() });
+                    });
+                    renderFoodList(foodItems);
+                }, (error) => {
+                    console.error("Error getting documents: ", error);
+                    showModal("讀取資料失敗，請檢查連線。");
+                });
+            } catch (error) {
+                console.error("Error setting up Firestore listener:", error);
+                showModal("設定資料監聽器時出錯。");
+            }
+        }
+
+        // Add food item to Firestore
+        async function addFoodItem(item) {
+            if (!db || !userId) {
+                showModal("資料庫未準備好，請稍後再試。");
+                return;
+            }
+            try {
+                const firestore = await import('https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js');
+                const foodCollectionRef = firestore.collection(db, `artifacts/${appId}/users/${userId}/foodItems`);
+                await firestore.addDoc(foodCollectionRef, item);
+            } catch (e) {
+                console.error("Error adding document: ", e);
+                showModal("新增食物失敗，請稍後再試。");
+            }
+        }
+
+        // Delete food item from Firestore
+        async function deleteFoodItem(id) {
+            if (!db || !userId) {
+                showModal("資料庫未準備好，請稍後再試。");
+                return;
+            }
+            try {
+                const firestore = await import('https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js');
+                const docRef = firestore.doc(db, `artifacts/${appId}/users/${userId}/foodItems`, id);
+                await firestore.deleteDoc(docRef);
+            } catch (e) {
+                console.error("Error removing document: ", e);
+                showModal("刪除食物失敗，請稍後再試。");
+            }
+        }
+
+        // Calculate days remaining
+        function getDaysRemaining(expiryDate) {
+            const today = new Date();
+            today.setHours(0, 0, 0, 0); // Normalize today's date
+            const expDate = new Date(expiryDate);
+            expDate.setHours(0, 0, 0, 0); // Normalize expiry date
+            const diffTime = expDate.getTime() - today.getTime();
+            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+            return diffDays;
+        }
+
+        // Render the food list
+        function renderFoodList(items) {
+            const foodListElement = document.getElementById('foodList');
+            foodListElement.innerHTML = '';
+            
+            // Sort items by expiry date
+            items.sort((a, b) => new Date(a.expiryDate) - new Date(b.expiryDate));
+
+            if (items.length === 0) {
+                foodListElement.innerHTML = '<p class="text-center text-gray-500">冰箱裡沒有食物。新增一些吧！</p>';
+                return;
+            }
+
+            items.forEach(item => {
+                const daysRemaining = getDaysRemaining(item.expiryDate);
+                let statusClass = 'list-item-ok'; // Default green
+                let expiryStatusText;
+
+                // 更新邏輯：已過期、今天到期和剩餘 1 天都標示為紅色
+                if (daysRemaining < 0) {
+                    statusClass = 'list-item-expired';
+                    expiryStatusText = '已過期';
+                } else if (daysRemaining <= 1) { 
+                    statusClass = 'list-item-expired'; // 這裡將剩餘 1 天的狀態改為紅色
+                    expiryStatusText = `即將過期 (剩餘 ${daysRemaining} 天)`;
+                    if(daysRemaining === 0) expiryStatusText = '今天到期';
+                } else if (daysRemaining <= 3) {
+                    statusClass = 'list-item-warning';
+                    expiryStatusText = `即將過期 (剩餘 ${daysRemaining} 天)`;
+                } else {
+                    statusClass = 'list-item-ok';
+                    expiryStatusText = `剩餘 ${daysRemaining} 天`;
+                }
+
+                const listItem = document.createElement('div');
+                listItem.className = `p-4 rounded-lg shadow-sm flex items-center justify-between ${statusClass}`;
+                listItem.innerHTML = `
+                    <div>
+                        <h3 class="text-lg font-medium text-gray-800">${item.foodName}</h3>
+                        <p class="text-sm text-gray-600">過期日: ${item.expiryDate}</p>
+                        <p class="text-sm font-semibold">過期狀態: ${expiryStatusText}</p>
+                        ${item.notes ? `<p class="text-xs text-gray-500">備註: ${item.notes}</p>` : ''}
+                    </div>
+                    <button class="delete-btn text-white bg-red-500 hover:bg-red-600 font-bold p-2 rounded-full transition duration-300 shadow" data-id="${item.id}">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd" />
+                        </svg>
+                    </button>
+                `;
+                foodListElement.appendChild(listItem);
+            });
+
+            // Add event listeners for delete buttons
+            document.querySelectorAll('.delete-btn').forEach(button => {
+                button.addEventListener('click', (e) => {
+                    const id = e.currentTarget.dataset.id;
+                    deleteFoodItem(id);
+                });
+            });
+        }
+
+        // Event listener for the form submission
+        document.getElementById('addItemForm').addEventListener('submit', (e) => {
+            e.preventDefault();
+            const foodName = document.getElementById('foodName').value;
+            const expiryDate = document.getElementById('expiryDate').value;
+            const notes = document.getElementById('notes').value;
+            
+            const newItem = {
+                foodName: foodName,
+                expiryDate: expiryDate,
+                notes: notes,
+                createdAt: new Date().toISOString()
+            };
+
+            addFoodItem(newItem);
+            e.target.reset(); // Reset form fields
+        });
+
+        // Initialize the app on window load
+        window.onload = function() {
+            initializeFirebaseAndAuth();
+
+            // 處理「過期日」與「幾天過期」的連動
+            const expiryDateInput = document.getElementById('expiryDate');
+            const daysUntilExpiryInput = document.getElementById('daysUntilExpiry');
+
+            // 根據「過期日」計算「幾天過期」
+            expiryDateInput.addEventListener('input', () => {
+                const expiryDate = expiryDateInput.value;
+                if (expiryDate) {
+                    const today = new Date();
+                    today.setHours(0, 0, 0, 0);
+                    const selectedDate = new Date(expiryDate);
+                    selectedDate.setHours(0, 0, 0, 0);
+                    const diffTime = selectedDate.getTime() - today.getTime();
+                    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                    daysUntilExpiryInput.value = diffDays;
+                } else {
+                    daysUntilExpiryInput.value = '';
+                }
+            });
+
+            // 根據「幾天過期」計算「過期日」
+            daysUntilExpiryInput.addEventListener('input', () => {
+                const days = daysUntilExpiryInput.value;
+                if (days !== '') {
+                    const today = new Date();
+                    today.setDate(today.getDate() + parseInt(days));
+                    const year = today.getFullYear();
+                    const month = (today.getMonth() + 1).toString().padStart(2, '0');
+                    const day = today.getDate().toString().padStart(2, '0');
+                    expiryDateInput.value = `${year}-${month}-${day}`;
+                } else {
+                    expiryDateInput.value = '';
+                }
+            });
+        };
+
+    </script>
+</body>
+</html>
